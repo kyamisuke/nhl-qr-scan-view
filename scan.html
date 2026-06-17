@@ -16,10 +16,15 @@
   .status.processing { background: #fff3e0; color: #e65100; }
   .status.error { background: #ffebee; color: #c62828; font-weight: normal; font-size: 13px; word-break: break-word; }
 
-  .start-container { text-align: center; padding: 40px 20px; }
-  .start-btn { padding: 18px 36px; background: #2e7d32; color: white; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; }
-  .start-btn:active { background: #1b5e20; }
+  .panel { max-width: 420px; margin: 0 auto; text-align: center; padding: 40px 20px; }
+  .panel p.intro { margin: 0 0 16px 0; color: #555; font-size: 14px; }
+  .key-input { width: 100%; padding: 14px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; margin-bottom: 12px; font-family: monospace; }
+  .primary-btn { padding: 16px 36px; background: #2e7d32; color: white; border: none; border-radius: 8px; font-size: 17px; font-weight: bold; cursor: pointer; width: 100%; }
+  .primary-btn:active { background: #1b5e20; }
+  .primary-btn:disabled { background: #999; }
+  .secondary-btn { padding: 10px 18px; background: #fff; color: #555; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; cursor: pointer; margin-top: 20px; }
   .start-hint { margin-top: 16px; font-size: 13px; color: #666; }
+  .key-error { color: #c62828; font-size: 13px; margin-top: 12px; display: none; }
 
   .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; padding: 20px; z-index: 1000; }
   .overlay.active { display: flex; }
@@ -47,16 +52,28 @@
 <body>
 <h1>QR受付</h1>
 
-<div id="startContainer" class="start-container">
-  <button id="startBtn" class="start-btn" onclick="startScanner()">スキャンを開始する</button>
-  <p class="start-hint">タップしてカメラを起動してください</p>
+<!-- 初期表示: アクセスキー入力 -->
+<div id="keyContainer" class="panel">
+  <p class="intro">受付システムのアクセスキーを入力してください</p>
+  <input type="password" id="keyInput" class="key-input" placeholder="ACCESS_KEY" autocomplete="off">
+  <button id="keyBtn" class="primary-btn" onclick="submitKey()">確認</button>
+  <p id="keyError" class="key-error"></p>
 </div>
 
+<!-- キー認証済: スキャン開始 -->
+<div id="startContainer" class="panel" style="display:none;">
+  <button class="primary-btn" onclick="startScanner()">スキャンを開始する</button>
+  <p class="start-hint">タップしてカメラを起動してください</p>
+  <button class="secondary-btn" onclick="resetKey()">キーをリセット</button>
+</div>
+
+<!-- スキャン中 -->
 <div id="reader" style="display:none;"></div>
 <div id="status" class="status scanning" style="display:none;">QRコードをかざしてください</div>
 
 <p class="footer">※「QRコード」は株式会社デンソーウェーブの登録商標です。</p>
 
+<!-- 結果オーバーレイ -->
 <div id="overlay" class="overlay">
   <div id="overlayContent"></div>
   <button class="next-btn" onclick="resumeScan()">次の人をスキャン</button>
@@ -66,26 +83,85 @@
   // ============================================================
   // ▼▼▼ 設定 ▼▼▼
   // ============================================================
-  // GAS 新プロジェクトのデプロイURL(/exec で終わる)
-  const GAS_API_URL  = 'https://script.google.com/macros/s/【新アプリID】/exec';
+  const GAS_API_URL = 'https://script.google.com/macros/s/【新アプリID】/exec';
+  // ACCESS_KEY はここには書かない。ブラウザで入力させる。
+  // ============================================================
 
-  // GAS側の ACCESS_KEY と完全に同じ値を入れる
-  const ACCESS_KEY   = 'ここにACCESS_KEYを貼り付け';
-  // ============================================================
-  // ▲▲▲ 設定 ▲▲▲
-  // ============================================================
+  // 保存済みキーを localStorage から読み込み(なければ空文字)
+  // 注: タブを閉じても再入力したくない用途なので localStorage を使用
+  //     1イベント限定で運用するなら sessionStorage に変更しても良い
+  let ACCESS_KEY = localStorage.getItem('nhl_access_key') || '';
 
   let scanner = null;
   let scanning = false;
   let lastUuid = null;
   let lastScanTime = 0;
 
-  function setStatus(text, cls) {
-    const el = document.getElementById('status');
-    el.textContent = text;
-    el.className = 'status ' + cls;
+  // 起動時の初期化
+  window.addEventListener('load', () => {
+    if (ACCESS_KEY) {
+      showStartScreen();
+    } else {
+      document.getElementById('keyInput').focus();
+    }
+  });
+
+  // ----- キー認証 -----
+  function submitKey() {
+    const key = document.getElementById('keyInput').value.trim();
+    if (!key) {
+      showKeyError('キーを入力してください');
+      return;
+    }
+
+    showKeyError('');
+    const btn = document.getElementById('keyBtn');
+    btn.disabled = true;
+    btn.textContent = '検証中…';
+
+    fetch(GAS_API_URL + '?api=validate&key=' + encodeURIComponent(key))
+      .then(r => r.json())
+      .then(r => {
+        btn.disabled = false;
+        btn.textContent = '確認';
+        if (r.status === 'ok') {
+          ACCESS_KEY = key;
+          localStorage.setItem('nhl_access_key', key);
+          showStartScreen();
+        } else {
+          showKeyError('キーが正しくありません');
+        }
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = '確認';
+        showKeyError('通信エラー: ' + ((err && err.message) || String(err)));
+      });
   }
 
+  function showKeyError(msg) {
+    const el = document.getElementById('keyError');
+    if (msg) {
+      el.textContent = msg;
+      el.style.display = 'block';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
+  function resetKey() {
+    if (!confirm('保存されたキーを削除します。再度入力が必要になります。よろしいですか?')) return;
+    ACCESS_KEY = '';
+    localStorage.removeItem('nhl_access_key');
+    location.reload();
+  }
+
+  function showStartScreen() {
+    document.getElementById('keyContainer').style.display = 'none';
+    document.getElementById('startContainer').style.display = 'block';
+  }
+
+  // ----- スキャン -----
   function startScanner() {
     document.getElementById('startContainer').style.display = 'none';
     document.getElementById('reader').style.display = 'block';
@@ -96,7 +172,7 @@
       { facingMode: 'environment' },
       { fps: 10, qrbox: { width: 260, height: 260 } },
       onScanSuccess,
-      () => { /* スキャン中の小さい失敗は無視 */ }
+      () => {}
     ).then(() => {
       scanning = true;
       setStatus('QRコードをかざしてください', 'scanning');
@@ -110,7 +186,6 @@
   }
 
   function onScanSuccess(decodedText) {
-    // 同じQRの連打を防ぐ(2秒以内の重複読み取りは無視)
     const now = Date.now();
     if (decodedText === lastUuid && (now - lastScanTime) < 2000) return;
     lastUuid = decodedText;
@@ -122,15 +197,12 @@
       return;
     }
 
-    // スキャン処理中は一時停止
     scanner.pause(true);
     scanning = false;
     setStatus('処理中…', 'processing');
 
-    // フィードバック(バイブ)
     if (navigator.vibrate) navigator.vibrate(80);
 
-    // GAS API へ問い合わせ
     const url = GAS_API_URL
               + '?api=assign'
               + '&uuid=' + encodeURIComponent(uuid)
@@ -141,16 +213,29 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
-      .then(showResult)
+      .then(r => {
+        // unauthorized が返ってきた = キーが古い or 無効 → キーを削除して再入力に戻す
+        if (r && r.status === 'unauthorized') {
+          ACCESS_KEY = '';
+          localStorage.removeItem('nhl_access_key');
+          showResult({ status: 'unauthorized', message: 'キーが無効になりました。再度入力してください。' });
+        } else {
+          showResult(r);
+        }
+      })
       .catch(err => showResult({ status: 'error', message: (err && err.message) || String(err) }));
   }
 
   function extractUuid(text) {
-    // URL形式(?uuid=...)の場合は uuid パラメータを抽出
     const m = String(text || '').match(/[?&]uuid=([^&]+)/);
     if (m) return decodeURIComponent(m[1]);
-    // それ以外は丸ごと UUID とみなす
     return String(text || '').trim();
+  }
+
+  function setStatus(text, cls) {
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className = 'status ' + cls;
   }
 
   function showResult(r) {
@@ -179,7 +264,7 @@
     } else if (r.status === 'no_slots') {
       content.innerHTML = '<p class="msg">満員です</p>';
     } else if (r.status === 'unauthorized') {
-      content.innerHTML = '<p class="msg">認証エラー</p><p class="sub">ACCESS_KEYを確認してください</p>';
+      content.innerHTML = '<p class="msg">認証エラー</p><p class="sub">' + esc(r.message || 'キーが無効です') + '</p>';
     } else if (r.status === 'invalid') {
       content.innerHTML = '<p class="msg">無効なQRコードです</p><p class="sub">' + esc(r.message) + '</p>';
     } else {
@@ -189,8 +274,20 @@
 
   function resumeScan() {
     document.getElementById('overlay').className = 'overlay';
-    // 「同じ人を再スキャン」も可能にするため lastUuid をクリア
     lastUuid = null;
+
+    // unauthorized で戻る場合はキー入力に飛ばす
+    if (!ACCESS_KEY) {
+      if (scanner) {
+        scanner.stop().catch(() => {});
+      }
+      document.getElementById('reader').style.display = 'none';
+      document.getElementById('status').style.display = 'none';
+      document.getElementById('keyContainer').style.display = 'block';
+      document.getElementById('keyInput').focus();
+      return;
+    }
+
     if (scanner) scanner.resume();
     scanning = true;
     setStatus('QRコードをかざしてください', 'scanning');
