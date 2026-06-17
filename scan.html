@@ -106,6 +106,43 @@
     }
   });
 
+  // ----- JSONPヘルパー(CORS回避) -----
+  // GAS Web App は /exec → googleusercontent.com のリダイレクト時に
+  // Access-Control-Allow-Origin が付与されないためfetchが使えない。
+  // <script>タグはリダイレクト+CORSの影響を受けないので、JSONPでバイパスする。
+  function jsonp(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const callbackName = 'jsonp_cb_' + Math.random().toString(36).slice(2).replace(/[^a-z0-9]/g, '');
+      const sep = url.indexOf('?') >= 0 ? '&' : '?';
+      const fullUrl = url + sep + 'callback=' + callbackName;
+
+      let script;
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        reject(new Error('Timeout'));
+      }, timeoutMs || 30000);
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        try { delete window[callbackName]; } catch (e) { window[callbackName] = undefined; }
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      window[callbackName] = function (data) {
+        cleanup();
+        resolve(data);
+      };
+
+      script = document.createElement('script');
+      script.src = fullUrl;
+      script.onerror = function () {
+        cleanup();
+        reject(new Error('Script load failed'));
+      };
+      document.body.appendChild(script);
+    });
+  }
+
   // ----- キー認証 -----
   function submitKey() {
     const key = document.getElementById('keyInput').value.trim();
@@ -119,12 +156,11 @@
     btn.disabled = true;
     btn.textContent = '検証中…';
 
-    fetch(GAS_API_URL + '?api=validate&key=' + encodeURIComponent(key))
-      .then(r => r.json())
+    jsonp(GAS_API_URL + '?api=validate&key=' + encodeURIComponent(key))
       .then(r => {
         btn.disabled = false;
         btn.textContent = '確認';
-        if (r.status === 'ok') {
+        if (r && r.status === 'ok') {
           ACCESS_KEY = key;
           localStorage.setItem('nhl_access_key', key);
           showStartScreen();
@@ -208,11 +244,7 @@
               + '&uuid=' + encodeURIComponent(uuid)
               + '&key='  + encodeURIComponent(ACCESS_KEY);
 
-    fetch(url, { method: 'GET', redirect: 'follow' })
-      .then(r => {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
+    jsonp(url)
       .then(r => {
         // unauthorized が返ってきた = キーが古い or 無効 → キーを削除して再入力に戻す
         if (r && r.status === 'unauthorized') {
