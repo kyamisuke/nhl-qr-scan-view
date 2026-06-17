@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NEXT HOUSE LAB. QR受付</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 12px; background: #f0f0f0; }
+  h1 { font-size: 18px; margin: 0 0 12px 0; text-align: center; color: #333; }
+
+  #reader { width: 100%; max-width: 420px; margin: 0 auto; border-radius: 8px; overflow: hidden; }
+  .status { padding: 14px; text-align: center; margin: 12px auto 0 auto; border-radius: 8px; max-width: 420px; font-weight: bold; }
+  .status.scanning { background: #e3f2fd; color: #1565c0; }
+  .status.processing { background: #fff3e0; color: #e65100; }
+  .status.error { background: #ffebee; color: #c62828; font-weight: normal; font-size: 13px; word-break: break-word; }
+
+  .start-container { text-align: center; padding: 40px 20px; }
+  .start-btn { padding: 18px 36px; background: #2e7d32; color: white; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; }
+  .start-btn:active { background: #1b5e20; }
+  .start-hint { margin-top: 16px; font-size: 13px; color: #666; }
+
+  .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; padding: 20px; z-index: 1000; }
+  .overlay.active { display: flex; }
+  .overlay.new { background: #2e7d32; color: white; }
+  .overlay.duplicate { background: #ef6c00; color: white; }
+  .overlay.invalid { background: #c62828; color: white; }
+  .overlay.no_slots { background: #6a1b9a; color: white; }
+  .overlay.not_open { background: #37474f; color: white; }
+  .overlay.error, .overlay.unauthorized { background: #424242; color: white; }
+
+  .overlay .dancer { font-size: 18px; margin: 0; }
+  .overlay .entry { font-size: 14px; margin: 6px 0 24px 0; opacity: 0.9; }
+  .overlay .label { font-size: 16px; margin: 0; }
+  .overlay .num { font-size: 140px; font-weight: bold; margin: 10px 0; line-height: 1; }
+  .overlay .warning { background: rgba(0,0,0,0.25); padding: 10px 18px; border-radius: 8px; margin-top: 20px; font-size: 14px; }
+  .overlay .msg { font-size: 22px; text-align: center; margin: 0; }
+  .overlay .sub { font-size: 13px; text-align: center; margin-top: 12px; opacity: 0.85; max-width: 90%; word-break: break-word; }
+
+  .next-btn { padding: 14px 32px; background: white; color: #333; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; margin-top: 30px; cursor: pointer; }
+  .next-btn:active { background: #eee; }
+
+  .footer { text-align: center; font-size: 10px; color: #999; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>QR受付</h1>
+
+<div id="startContainer" class="start-container">
+  <button id="startBtn" class="start-btn" onclick="startScanner()">スキャンを開始する</button>
+  <p class="start-hint">タップしてカメラを起動してください</p>
+</div>
+
+<div id="reader" style="display:none;"></div>
+<div id="status" class="status scanning" style="display:none;">QRコードをかざしてください</div>
+
+<p class="footer">※「QRコード」は株式会社デンソーウェーブの登録商標です。</p>
+
+<div id="overlay" class="overlay">
+  <div id="overlayContent"></div>
+  <button class="next-btn" onclick="resumeScan()">次の人をスキャン</button>
+</div>
+
+<script>
+  // ============================================================
+  // ▼▼▼ 設定 ▼▼▼
+  // ============================================================
+  // GAS 新プロジェクトのデプロイURL(/exec で終わる)
+  const GAS_API_URL  = 'https://script.google.com/macros/s/【新アプリID】/exec';
+
+  // GAS側の ACCESS_KEY と完全に同じ値を入れる
+  const ACCESS_KEY   = 'ここにACCESS_KEYを貼り付け';
+  // ============================================================
+  // ▲▲▲ 設定 ▲▲▲
+  // ============================================================
+
+  let scanner = null;
+  let scanning = false;
+  let lastUuid = null;
+  let lastScanTime = 0;
+
+  function setStatus(text, cls) {
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className = 'status ' + cls;
+  }
+
+  function startScanner() {
+    document.getElementById('startContainer').style.display = 'none';
+    document.getElementById('reader').style.display = 'block';
+    document.getElementById('status').style.display = 'block';
+
+    scanner = new Html5Qrcode('reader');
+    scanner.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 260, height: 260 } },
+      onScanSuccess,
+      () => { /* スキャン中の小さい失敗は無視 */ }
+    ).then(() => {
+      scanning = true;
+      setStatus('QRコードをかざしてください', 'scanning');
+    }).catch(err => {
+      const name = err && err.name ? err.name : 'Unknown';
+      const msg  = err && err.message ? err.message : String(err);
+      setStatus('カメラ起動エラー [' + name + '] ' + msg, 'error');
+      document.getElementById('startContainer').style.display = 'block';
+      document.getElementById('reader').style.display = 'none';
+    });
+  }
+
+  function onScanSuccess(decodedText) {
+    // 同じQRの連打を防ぐ(2秒以内の重複読み取りは無視)
+    const now = Date.now();
+    if (decodedText === lastUuid && (now - lastScanTime) < 2000) return;
+    lastUuid = decodedText;
+    lastScanTime = now;
+
+    const uuid = extractUuid(decodedText);
+    if (!uuid) {
+      showResult({ status: 'invalid', message: 'UUIDを抽出できませんでした' });
+      return;
+    }
+
+    // スキャン処理中は一時停止
+    scanner.pause(true);
+    scanning = false;
+    setStatus('処理中…', 'processing');
+
+    // フィードバック(バイブ)
+    if (navigator.vibrate) navigator.vibrate(80);
+
+    // GAS API へ問い合わせ
+    const url = GAS_API_URL
+              + '?api=assign'
+              + '&uuid=' + encodeURIComponent(uuid)
+              + '&key='  + encodeURIComponent(ACCESS_KEY);
+
+    fetch(url, { method: 'GET', redirect: 'follow' })
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(showResult)
+      .catch(err => showResult({ status: 'error', message: (err && err.message) || String(err) }));
+  }
+
+  function extractUuid(text) {
+    // URL形式(?uuid=...)の場合は uuid パラメータを抽出
+    const m = String(text || '').match(/[?&]uuid=([^&]+)/);
+    if (m) return decodeURIComponent(m[1]);
+    // それ以外は丸ごと UUID とみなす
+    return String(text || '').trim();
+  }
+
+  function showResult(r) {
+    r = r || {};
+    const overlay = document.getElementById('overlay');
+    const content = document.getElementById('overlayContent');
+    overlay.className = 'overlay active ' + (r.status || 'error');
+
+    if (r.status === 'new') {
+      content.innerHTML =
+        '<p class="dancer">' + esc(r.dancerName) + ' 様</p>' +
+        '<p class="entry">エントリー番号: ' + esc(r.entryNum) + '</p>' +
+        '<p class="label">あなたのワーク番号は</p>' +
+        '<p class="num">' + esc(r.workNumber) + '</p>' +
+        '<p class="label">番です</p>';
+    } else if (r.status === 'duplicate') {
+      content.innerHTML =
+        '<p class="dancer">' + esc(r.dancerName) + ' 様</p>' +
+        '<p class="entry">エントリー番号: ' + esc(r.entryNum) + '</p>' +
+        '<p class="label">ワーク番号(割当済み)</p>' +
+        '<p class="num">' + esc(r.workNumber) + '</p>' +
+        '<p class="label">番です</p>' +
+        '<p class="warning">' + esc(r.scanCount) + '回目のスキャンです</p>';
+    } else if (r.status === 'not_open') {
+      content.innerHTML = '<p class="msg">受付開始前です</p>';
+    } else if (r.status === 'no_slots') {
+      content.innerHTML = '<p class="msg">満員です</p>';
+    } else if (r.status === 'unauthorized') {
+      content.innerHTML = '<p class="msg">認証エラー</p><p class="sub">ACCESS_KEYを確認してください</p>';
+    } else if (r.status === 'invalid') {
+      content.innerHTML = '<p class="msg">無効なQRコードです</p><p class="sub">' + esc(r.message) + '</p>';
+    } else {
+      content.innerHTML = '<p class="msg">エラー</p><p class="sub">' + esc(r.message || r.status) + '</p>';
+    }
+  }
+
+  function resumeScan() {
+    document.getElementById('overlay').className = 'overlay';
+    // 「同じ人を再スキャン」も可能にするため lastUuid をクリア
+    lastUuid = null;
+    if (scanner) scanner.resume();
+    scanning = true;
+    setStatus('QRコードをかざしてください', 'scanning');
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>
